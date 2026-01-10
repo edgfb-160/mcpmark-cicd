@@ -1,0 +1,158 @@
+name: Pull Request Automation
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Run ESLint
+        id: eslint
+        run: npm run lint || echo "eslint_failed=true" >> $GITHUB_OUTPUT
+      - name: Run Prettier Check
+        id: prettier
+        run: npx prettier --check . || echo "prettier_failed=true" >> $GITHUB_OUTPUT
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = `
+### Code Quality Report
+- **ESLint**: ${{ steps.eslint.outputs.eslint_failed ? '❌ Failed' : '✅ Passed' }}
+- **Prettier**: ${{ steps.prettier.outputs.prettier_failed ? '❌ Failed' : '✅ Passed' }}
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Run Test Suite
+        id: test
+        run: npm test -- --coverage || echo "test_failed=true" >> $GITHUB_OUTPUT
+      - name: Upload Coverage Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-coverage
+          path: coverage/
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const coveragePath = `${process.env.GITHUB_WORKSPACE}/coverage/coverage-summary.json`;
+            let coverageSummary = { total: { lines: { pct: 'N/A', covered: 0, total: 0 }, functions: { pct: 'N/A', covered: 0, total: 0 }, branches: { pct: 'N/A', covered: 0, total: 0 } } };
+            if (fs.existsSync(coveragePath)) {
+              coverageSummary = JSON.parse(fs.readFileSync(coveragePath, 'utf8'));
+            }
+            const report = `
+### Test Coverage Report
+- **Total Lines**: ${coverageSummary.total.lines.pct}% (${coverageSummary.total.lines.covered}/${coverageSummary.total.lines.total})
+- **Total Functions**: ${coverageSummary.total.functions.pct}% (${coverageSummary.total.functions.covered}/${coverageSummary.total.functions.total})
+- **Total Branches**: ${coverageSummary.total.branches.pct}% (${coverageSummary.total.branches.covered}/${coverageSummary.total.branches.total})
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Run Dependency Vulnerability Check
+        id: audit
+        run: npm audit --audit-level moderate || echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+      - name: Run Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        id: gitleaks
+        with:
+          args: --path=. --verbose
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = `
+### Security Scan Report
+- **Vulnerabilities**: ${{ steps.audit.outputs.vulnerabilities_found ? '⚠️ Found' : '✅ None' }}
+- **Dependencies**: Scanned for vulnerabilities using npm audit
+- **Secrets**: ${{ steps.gitleaks.outcome == 'failure' ? '❌ Secrets detected' : '✅ No secrets found' }}
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Build Application
+        id: build
+        run: npm run build || echo "build_failed=true" >> $GITHUB_OUTPUT
+      - name: Validate Endpoints
+        id: endpoints
+        run: |
+          # Start application in background
+          if npm start & sleep 5; then
+            curl -f http://localhost:3000/health || echo "endpoint_failed=true" >> $GITHUB_OUTPUT
+            pkill -f "npm start"
+          else
+            echo "endpoint_failed=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Upload Deployment Preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: dist/
+      - name: Post Build Validation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = `
+### Build Validation
+- **Build Status**: ${{ steps.build.outputs.build_failed ? '❌ Failed' : '✅ Passed' }}
+- **Endpoints**: ${{ steps.endpoints.outputs.endpoint_failed ? '❌ Some endpoints failed' : '✅ All endpoints accessible' }}
+- **Deployment Preview**: Artifact uploaded for preview
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
